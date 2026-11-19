@@ -65,6 +65,7 @@ class IslandService : Service() {
         (prefs.getString("excluded", "ru.yandex.music") ?: "").split(",").filter { it.isNotBlank() }.toSet()
     private var baseColor = 0
     private var appliedColor = 0
+    private var appliedStyle = ""
     private lateinit var compactArt: ImageView
     private lateinit var eq: EqualizerView
     private lateinit var card: LinearLayout
@@ -167,9 +168,11 @@ class IslandService : Service() {
         prefs.registerOnSharedPreferenceChangeListener(prefListener)
         MediaListener.onChanged = { handler.post { refresh() } }
         initSessions()
+        AutoPause.start(this)
     }
 
     override fun onDestroy() {
+        AutoPause.stop()
         MediaListener.onChanged = null
         handler.removeCallbacksAndMessages(null)
         if (::prefs.isInitialized) prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
@@ -386,12 +389,16 @@ class IslandService : Service() {
             else -> dp(prefs.getInt("y", 6))
         }
         compact.layoutParams = compact.layoutParams.apply { width = dp(prefs.getInt("w", 140)); height = h }
-        (compact.background as? GradientDrawable)?.cornerRadius = h / 2f
+        styleCompact(h)
         compactArt.layoutParams = compactArt.layoutParams.apply { width = h - dp(10); height = h - dp(10) }
         root.alpha = prefs.getInt("alpha", 100) / 100f
+        applySizes()
         eq.visibility = if (prefs.getBoolean("eq", true)) View.VISIBLE else View.GONE
-        val want = if (prefs.getBoolean("autocolor", true)) baseColor else 0xFF8B5CF6.toInt()
-        if (want != 0 && want != appliedColor) { applyColor(want); appliedColor = want }
+        val want = if (prefs.getBoolean("autocolor", true)) baseColor else accentColor()
+        val styleKey = "${prefs.getInt("theme", 0)}|${prefs.getInt("card_r", 30)}|${prefs.getInt("accent", 0)}"
+        if (want != 0 && (want != appliedColor || styleKey != appliedStyle)) {
+            applyColor(want); appliedColor = want; appliedStyle = styleKey
+        }
         if (attached) wm.updateViewLayout(root, lp)
     }
 
@@ -674,6 +681,57 @@ class IslandService : Service() {
         if (!dragging) seek.progress = if (duration > 0) (pos * 1000 / duration).toInt() else 0
     }
 
+    // Размеры элементов раскрытой карточки и эквалайзера
+    private fun applySizes() {
+        val sw = resources.displayMetrics.widthPixels
+        val pct = prefs.getInt("card_w", 100)
+        card.layoutParams = card.layoutParams.apply { width = if (pct >= 100) sw - dp(10) else sw * pct / 100 }
+        val art = dp(prefs.getInt("card_art", 56))
+        cardArt.layoutParams = cardArt.layoutParams.apply { width = art; height = art }
+        val ts = prefs.getInt("text_scale", 100) / 100f
+        title.textSize = 20f * ts
+        artist.textSize = 16f * ts
+        tCur.textSize = 14f * ts
+        tEnd.textSize = 14f * ts
+        val bh = dp(prefs.getInt("btn_h", 64))
+        val row = (0 until card.childCount).map { card.getChildAt(it) }
+            .filterIsInstance<LinearLayout>()
+            .firstOrNull { it.childCount > 0 && it.getChildAt(0) is ImageButton }
+        row?.let { r ->
+            for (i in 0 until r.childCount) {
+                val v = r.getChildAt(i)
+                v.layoutParams = v.layoutParams.apply { height = bh }
+            }
+        }
+        val es = prefs.getInt("eq_size", 100) / 100f
+        eq.layoutParams = eq.layoutParams.apply { width = (dp(22) * es).toInt(); height = (dp(18) * es).toInt() }
+    }
+
+    private fun accentColor(): Int {
+        val pal = intArrayOf(
+            0xFF8B5CF6.toInt(), 0xFF3B82F6.toInt(), 0xFF14B8A6.toInt(), 0xFF22C55E.toInt(),
+            0xFFF97316.toInt(), 0xFFEF4444.toInt(), 0xFFEC4899.toInt()
+        )
+        return pal[prefs.getInt("accent", 0).coerceIn(0, pal.size - 1)]
+    }
+
+    // Форма и тема компактной плашки
+    private fun styleCompact(h: Int) {
+        val bg = compact.background as? GradientDrawable ?: return
+        bg.cornerRadius = when (prefs.getInt("shape", 0)) {
+            0 -> h / 2f
+            1 -> dp(12).toFloat().coerceAtMost(h / 2f)
+            else -> dp(4).toFloat()
+        }
+        val accent = if (prefs.getBoolean("autocolor", true) && baseColor != 0) baseColor else accentColor()
+        when (prefs.getInt("theme", 0)) {
+            1 -> { bg.setColor(Color.BLACK); bg.setStroke(0, 0) }
+            2 -> { bg.setColor(0xCC000000.toInt()); bg.setStroke(dp(1), 0x33FFFFFF) }
+            3 -> { bg.setColor(Color.BLACK); bg.setStroke(dp(2), accent) }
+            else -> { bg.setColor(Color.BLACK); bg.setStroke(dp(1), 0xFF2A2A2A.toInt()) }
+        }
+    }
+
     private fun applyColor(base: Int) {
         val hsv = FloatArray(3)
         Color.colorToHSV(base, hsv)
@@ -681,16 +739,20 @@ class IslandService : Service() {
         hsv[2] = hsv[2].coerceIn(0.55f, 0.95f)
         val main = Color.HSVToColor(hsv)
         val dark = Color.HSVToColor(floatArrayOf(hsv[0], hsv[1], 0.12f))
+        val theme = prefs.getInt("theme", 0)
+        val rad = dp(prefs.getInt("card_r", 30)).toFloat()
         val baseBg = GradientDrawable().apply {
-            setColor(0xFF050507.toInt())
-            cornerRadius = dp(30).toFloat()
+            setColor(when (theme) { 1 -> Color.BLACK; 2 -> 0xD9101014.toInt(); else -> 0xFF050507.toInt() })
+            cornerRadius = rad
+            if (theme == 3) setStroke(dp(2), main)
         }
+        val glowAlpha = when (theme) { 1 -> 0; 3 -> 0x55; else -> 0xCC }
         val glow = GradientDrawable().apply {
             setGradientType(GradientDrawable.RADIAL_GRADIENT)
             setGradientCenter(0.5f, 1.15f)
             setGradientRadius(dp(300).toFloat())
-            setColors(intArrayOf((main and 0x00FFFFFF) or (0xCC shl 24), Color.TRANSPARENT))
-            cornerRadius = dp(30).toFloat()
+            setColors(intArrayOf((main and 0x00FFFFFF) or (glowAlpha shl 24), Color.TRANSPARENT))
+            cornerRadius = rad
         }
         card.background = LayerDrawable(arrayOf(baseBg, glow))
         hsv[2] = 1f

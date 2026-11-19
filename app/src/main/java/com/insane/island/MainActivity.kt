@@ -237,12 +237,22 @@ class MainActivity : Activity() {
         }, lp(14))
         cv.addView(button("Выключить голос", 2) { stopService(Intent(this, VoiceService::class.java)) }, lp(10))
         cv.addView(
-            label("Говори команду: «лайк», «дальше», «стоп»…\nслово «кортекс» перед командой тоже работает.\nдальше · назад · стоп · старт · лайк · дизлайк\nгромче · тише · вперед · повтор · название · время\nответить (на звонок)", 13f, MUTED),
+            label("Говори команду: «лайк», «дальше», «стоп»…\nслово «кортекс» перед командой тоже работает.\nоткрой ютуб · открой телеграм · открой <имя приложения>\nдальше · назад · стоп · старт · лайк · дизлайк\nгромче · тише · вперед · повтор · название · время\nответить (на звонок)", 13f, MUTED),
             lp(14)
         )
         toggle(cv, "Требовать слово «кортекс»", "wake", false)
+        toggle(cv, "Быстрый отклик (реагировать сразу)", "fast", true)
+        toggle(cv, "Команда «открой …» для приложений", "openapps", true)
         slider(cv, "Порог уверенности голоса", "conf", 30, 95, 70, " %", null)
         col.addView(cv, lp(26))
+
+        // ---------- автопауза ----------
+        val cap = card()
+        cap.addView(label("АВТОПАУЗА", 12f, MUTED, true))
+        toggle(cap, "Пауза при отключении наушников", "ap_headset", true)
+        toggle(cap, "Пауза во время звонка", "ap_call", true)
+        toggle(cap, "Продолжить музыку после звонка", "ap_resume", true)
+        col.addView(cap, lp(26))
 
         // ---------- настройка острова ----------
         val c2 = card()
@@ -259,6 +269,27 @@ class MainActivity : Activity() {
         c2.addView(button("Не показывать для приложений…", 2) { pickExcluded() }, lp(18))
         c2.addView(button("Сбросить настройки острова", 2) { resetIsland() }, lp(10))
         col.addView(c2, lp(26))
+
+        // ---------- тема и форма ----------
+        val c3 = card()
+        c3.addView(label("ТЕМА И ФОРМА ОСТРОВА", 12f, MUTED, true))
+        choice(c3, "Тема", "theme", listOf("Тёмная", "Чистый чёрный", "Стекло", "Неон"), 0)
+        choice(c3, "Форма", "shape", listOf("Капсула", "Скруглённый", "Острые углы"), 0)
+        choice(c3, "Акцент (если цвет не от обложки)", "accent",
+            listOf("Фиолетовый", "Синий", "Бирюзовый", "Зелёный", "Оранжевый", "Красный", "Розовый"), 0)
+        slider(c3, "Скругление раскрытой карточки", "card_r", 8, 44, 30, " dp", null)
+        col.addView(c3, lp(26))
+
+        // ---------- размеры ----------
+        val c4 = card()
+        c4.addView(label("РАЗМЕРЫ ЭЛЕМЕНТОВ", 12f, MUTED, true))
+        c4.addView(label("Ширину и высоту плашки смотри выше, в «Настройке острова».", 13f, MUTED), lp(8))
+        slider(c4, "Ширина раскрытой карточки", "card_w", 60, 100, 100, " %", null)
+        slider(c4, "Размер обложки в карточке", "card_art", 40, 100, 56, " dp", null)
+        slider(c4, "Размер текста", "text_scale", 70, 150, 100, " %", null)
+        slider(c4, "Высота кнопок управления", "btn_h", 44, 96, 64, " dp", null)
+        slider(c4, "Размер эквалайзера", "eq_size", 50, 180, 100, " %", null)
+        col.addView(c4, lp(26))
 
         // ---------- диагностика ----------
         col.addView(button("Диагностика плеера", 2) {
@@ -332,6 +363,23 @@ class MainActivity : Activity() {
         parent.addView(sw, lp(16))
     }
 
+    private fun choice(parent: LinearLayout, title: String, key: String, options: List<String>, def: Int) {
+        val p = getSharedPreferences("island", Context.MODE_PRIVATE)
+        fun cur() = p.getInt(key, def).coerceIn(0, options.size - 1)
+        lateinit var b: TextView
+        b = button("$title: ${options[cur()]}", 2) {
+            AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(title)
+                .setSingleChoiceItems(options.toTypedArray(), cur()) { d, i ->
+                    p.edit().putInt(key, i).apply()
+                    b.text = "$title: ${options[i]}"
+                    d.dismiss()
+                }
+                .show()
+        }
+        parent.addView(b, lp(10))
+    }
+
     private fun pickExcluded() {
         val p = getSharedPreferences("island", Context.MODE_PRIVATE)
         val pm = packageManager
@@ -355,7 +403,9 @@ class MainActivity : Activity() {
     private fun resetIsland() {
         getSharedPreferences("island", Context.MODE_PRIVATE).edit()
             .remove("y").remove("x").remove("w").remove("h").remove("alpha").remove("pause")
-            .remove("collapse").remove("eq").remove("autocolor").remove("excluded").apply()
+            .remove("collapse").remove("eq").remove("autocolor").remove("excluded")
+            .remove("theme").remove("shape").remove("accent").remove("card_r")
+            .remove("card_w").remove("card_art").remove("text_scale").remove("btn_h").remove("eq_size").apply()
         recreate()
     }
 

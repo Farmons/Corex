@@ -24,6 +24,8 @@ import java.util.*
 class VoiceService : Service(), RecognitionListener {
     companion object { @Volatile var running = false }
 
+    private class Cmd(val name: String, val pkg: String? = null)
+
     // Слово «кортекс» необязательно (настраивается в приложении)
     private val wake = setOf("кортекс", "кортэкс", "картекс")
     private val commands = listOf(
@@ -31,10 +33,24 @@ class VoiceService : Service(), RecognitionListener {
         "лайк", "дизлайк", "громче", "тише", "вперед", "повтор", "название", "время",
         "ответить", "принять"
     )
+    // Как называть приложения с английскими названиями
+    private val aliases = mapOf(
+        "com.google.android.youtube" to "ютуб", "org.telegram.messenger" to "телеграм",
+        "org.telegram.messenger.web" to "телеграм", "com.whatsapp" to "ватсап",
+        "com.instagram.android" to "инстаграм", "com.zhiliaoapp.musically" to "тикток",
+        "com.ss.android.ugc.trill" to "тикток", "com.vkontakte.android" to "вк",
+        "com.android.chrome" to "хром", "com.spotify.music" to "спотифай",
+        "com.discord" to "дискорд", "com.android.settings" to "настройки",
+        "ru.yandex.music" to "яндекс музыка", "com.google.android.apps.maps" to "карты",
+        "com.google.android.gm" to "почта", "com.google.android.apps.photos" to "фото"
+    )
+    private val appMap = LinkedHashMap<String, String>()   // как произносится -> пакет
 
+    private val prefs by lazy { getSharedPreferences("island", MODE_PRIVATE) }
     private var speech: SpeechService? = null
     private var tts: TextToSpeech? = null
     private var last = 0L
+    private var fired = false
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -50,18 +66,84 @@ class VoiceService : Service(), RecognitionListener {
         if (tts == null) tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts?.language = Locale("ru") }
         if (speech == null) Thread {
             try {
+                val words = LinkedHashSet<String>()
+                words.addAll(wake); words.addAll(commands)
+                if (prefs.getBoolean("openapps", true)) {
+                    buildApps()
+                    words.add("открой")
+                    appMap.keys.flatMap { it.split(" ") }.distinct().take(250).forEach { words.add(it) }
+                }
+                words.add("[unk]")
                 val model = Model(File(filesDir, "model").absolutePath)
-                val grammar = JSONArray((wake + commands + "[unk]").toList()).toString()
-                val rec = Recognizer(model, 16000f, grammar).also { it.setWords(true) }
+                val rec = Recognizer(model, 16000f, JSONArray(words.toList()).toString()).also { it.setWords(true) }
                 speech = SpeechService(rec, 16000f).also { it.startListening(this) }
             } catch (e: Exception) { stopSelf() }
         }.start()
         return START_STICKY
     }
 
+    // Список приложений для команды «открой …»
+    private fun buildApps() {
+        appMap.clear()
+        val pm = packageManager
+        val list = pm.queryIntentActivities(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+        for (ri in list) {
+            val pkg = ri.activityInfo.packageName
+            if (pkg == packageName) continue
+            val label = ri.loadLabel(pm).toString().lowercase().replace('ё', 'е').trim()
+            val names = mutableListOf<String>()
+            if (label.any { it in 'а'..'я' } && label.none { it.isDigit() }) names.add(label)
+            aliases[pkg]?.let { names.add(it) }
+            for (nm in names) {
+                val clean = nm.replace(Regex("[^а-я ]"), " ").trim().replace(Regex("\\s+"), " ")
+                if (clean.isNotEmpty()) appMap.putIfAbsent(clean, pkg)
+            }
+        }
+    }
+
     private fun say(s: String) { tts?.speak(s, TextToSpeech.QUEUE_FLUSH, null, "cortex") }
 
+    // Разбор фразы: команда и индекс слова (для проверки уверенности)
+    private fun parse(words: List<String>, needWake: Boolean, final: Boolean): Pair<Cmd, Int>? {
+        val wi = words.indexOfFirst { it in wake }
+        val start = if (wi >= 0) wi + 1 else { if (needWake) return null; 0 }
+        val rest = words.drop(start)
+        if (rest.isEmpty()) return null
+
+        val oi = rest.indexOf("открой")
+        if (oi >= 0 && prefs.getBoolean("openapps", true)) {
+            val name = rest.drop(oi + 1)
+            if (name.isEmpty()) return null
+            for (n in name.size downTo 1) {
+                val key = name.take(n).joinToString(" ")
+                val pkg = appMap[key] ?: continue
+                // в частичном результате ждём конец, если есть более длинное название
+                if (!final && appMap.keys.any { it.startsWith("$key ") }) return null
+                return Cmd("открой", pkg) to (start + oi)
+            }
+            return null
+        }
+
+        // без слова-активатора принимается только одиночная команда
+        if (wi < 0 && rest.size != 1) return null
+        val ci = rest.indexOfFirst { it in commands }
+        if (ci < 0) return null
+        return Cmd(rest[ci]) to (start + ci)
+    }
+
+    // Мгновенная реакция по частичному результату (до паузы в речи)
+    override fun onPartialResult(h: String?) {
+        if (!prefs.getBoolean("fast", true)) return
+        val text = JSONObject(h ?: return).optString("partial")
+        val words = text.split(" ").filter { it.isNotBlank() }
+        if (words.isEmpty()) return
+        val r = parse(words, prefs.getBoolean("wake", false), false) ?: return
+        if (fire(r.first)) fired = true
+    }
+
     override fun onResult(h: String?) {
+        if (fired) { fired = false; return }      // уже выполнено по частичному результату
         val j = JSONObject(h ?: return)
         val arr = j.optJSONArray("result")
         val words: List<String>
@@ -74,27 +156,23 @@ class VoiceService : Service(), RecognitionListener {
             conf = words.map { 1.0 }
         }
         if (words.isEmpty()) return
+        val r = parse(words, prefs.getBoolean("wake", false), true) ?: return
+        if (conf[r.second] < prefs.getInt("conf", 70) / 100.0) return
+        fire(r.first)
+    }
 
-        val prefs = getSharedPreferences("island", MODE_PRIVATE)
-        val th = prefs.getInt("conf", 70) / 100.0
-        val needWake = prefs.getBoolean("wake", false)
-        val wi = words.indexOfFirst { it in wake }
-
-        val idx: Int = if (wi >= 0) {
-            // «кортекс <команда>» — работает всегда
-            (wi + 1 until words.size).firstOrNull { words[it] in commands } ?: return
-        } else {
-            if (needWake) return
-            // без слова — только отдельно сказанная команда (защита от ложных срабатываний)
-            if (words.size != 1 || words[0] !in commands) return
-            0
-        }
-        if (conf[idx] < th) return
-
+    private fun fire(cmd: Cmd): Boolean {
         val now = System.currentTimeMillis()
-        if (now - last < 1000) return
+        if (now - last < 900) return false
         last = now
-        run(words[idx])
+        if (cmd.name == "открой") openApp(cmd.pkg ?: return false) else run(cmd.name)
+        return true
+    }
+
+    private fun openApp(pkg: String) {
+        val i = packageManager.getLaunchIntentForPackage(pkg) ?: return
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try { startActivity(i) } catch (_: Exception) {}
     }
 
     private fun run(cmd: String) {
@@ -131,7 +209,6 @@ class VoiceService : Service(), RecognitionListener {
     }
 
     override fun onFinalResult(h: String?) {}
-    override fun onPartialResult(h: String?) {}
     override fun onError(e: Exception?) {}
     override fun onTimeout() {}
 
