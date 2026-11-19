@@ -26,6 +26,9 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.SeekBar
+import android.widget.Switch
+import android.app.AlertDialog
 import java.io.File
 import java.net.URL
 import java.util.zip.ZipInputStream
@@ -234,22 +237,27 @@ class MainActivity : Activity() {
         }, lp(14))
         cv.addView(button("Выключить голос", 2) { stopService(Intent(this, VoiceService::class.java)) }, lp(10))
         cv.addView(
-            label("Говори одной фразой: «кортекс, лайк».\nдальше · назад · стоп · старт · лайк · дизлайк\nгромче · тише · вперед · повтор · название · время\nответить (на звонок)", 13f, MUTED),
+            label("Говори команду: «лайк», «дальше», «стоп»…\nслово «кортекс» перед командой тоже работает.\nдальше · назад · стоп · старт · лайк · дизлайк\nгромче · тише · вперед · повтор · название · время\nответить (на звонок)", 13f, MUTED),
             lp(14)
         )
+        toggle(cv, "Требовать слово «кортекс»", "wake", false)
+        slider(cv, "Порог уверенности голоса", "conf", 30, 95, 70, " %", null)
         col.addView(cv, lp(26))
 
-        // ---------- положение ----------
+        // ---------- настройка острова ----------
         val c2 = card()
-        c2.addView(label("Положение под камеру", 16f, Color.WHITE, true))
-        c2.addView(
-            pairRow(button("▲  Выше", 2) { change("y", -2, -10, 80) }, button("▼  Ниже", 2) { change("y", 2, -10, 80) }),
-            lp(14)
-        )
-        c2.addView(
-            pairRow(button("◀  Уже", 2) { change("w", -10, 80, 320) }, button("Шире  ▶", 2) { change("w", 10, 80, 320) }),
-            lp(10)
-        )
+        c2.addView(label("НАСТРОЙКА ОСТРОВА", 12f, MUTED, true))
+        slider(c2, "Положение сверху", "y", -10, 80, 6, " dp", null)
+        slider(c2, "Сдвиг влево / вправо", "x", -150, 150, 0, " dp", null)
+        slider(c2, "Ширина", "w", 80, 320, 140, " dp", null)
+        slider(c2, "Высота", "h", 28, 60, 38, " dp", null)
+        slider(c2, "Прозрачность", "alpha", 30, 100, 100, " %", null)
+        slider(c2, "Прятать после паузы", "pause", 0, 120, 20, " с", "никогда")
+        slider(c2, "Авто-сворачивание карточки", "collapse", 0, 30, 0, " с", "выкл")
+        toggle(c2, "Эквалайзер на острове", "eq", true)
+        toggle(c2, "Цвет от обложки трека", "autocolor", true)
+        c2.addView(button("Не показывать для приложений…", 2) { pickExcluded() }, lp(18))
+        c2.addView(button("Сбросить настройки острова", 2) { resetIsland() }, lp(10))
         col.addView(c2, lp(26))
 
         // ---------- диагностика ----------
@@ -278,6 +286,77 @@ class MainActivity : Activity() {
             isFillViewport = true
             addView(col)
         })
+    }
+
+    private fun slider(parent: LinearLayout, title: String, key: String, min: Int, max: Int, def: Int, unit: String, zero: String?) {
+        val p = getSharedPreferences("island", Context.MODE_PRIVATE)
+        val value = label("", 14f, LIGHT)
+        fun show(v: Int) { value.text = if (zero != null && v == 0) zero else "$v$unit" }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(label(title, 15f, Color.WHITE), LinearLayout.LayoutParams(0, WRAP, 1f))
+            addView(value)
+        }
+        val start = p.getInt(key, def).coerceIn(min, max)
+        show(start)
+        val bar = SeekBar(this).apply {
+            this.max = max - min
+            progress = start - min
+            progressTintList = ColorStateList.valueOf(PURPLE)
+            thumbTintList = ColorStateList.valueOf(PURPLE2)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar, pr: Int, user: Boolean) {
+                    show(pr + min)
+                    if (user) p.edit().putInt(key, pr + min).apply()
+                }
+                override fun onStartTrackingTouch(s: SeekBar) {}
+                override fun onStopTrackingTouch(s: SeekBar) {}
+            })
+        }
+        parent.addView(head, lp(16))
+        parent.addView(bar, lp(4))
+    }
+
+    private fun toggle(parent: LinearLayout, title: String, key: String, def: Boolean) {
+        val p = getSharedPreferences("island", Context.MODE_PRIVATE)
+        val on = intArrayOf(android.R.attr.state_checked)
+        val sw = Switch(this).apply {
+            text = title
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            isChecked = p.getBoolean(key, def)
+            thumbTintList = ColorStateList(arrayOf(on, intArrayOf()), intArrayOf(PURPLE2, MUTED))
+            trackTintList = ColorStateList(arrayOf(on, intArrayOf()), intArrayOf(0x668B5CF6, 0x33FFFFFF))
+            setOnCheckedChangeListener { _, c -> p.edit().putBoolean(key, c).apply() }
+        }
+        parent.addView(sw, lp(16))
+    }
+
+    private fun pickExcluded() {
+        val p = getSharedPreferences("island", Context.MODE_PRIVATE)
+        val pm = packageManager
+        val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+            .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+            .filter { it.first != packageName }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
+        val cur = (p.getString("excluded", "ru.yandex.music") ?: "").split(",").filter { it.isNotBlank() }.toMutableSet()
+        val checked = BooleanArray(apps.size) { apps[it].first in cur }
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Не показывать на острове")
+            .setMultiChoiceItems(apps.map { it.second }.toTypedArray(), checked) { _, i, on ->
+                if (on) cur.add(apps[i].first) else cur.remove(apps[i].first)
+            }
+            .setPositiveButton("Готово") { _, _ -> p.edit().putString("excluded", cur.joinToString(",")).apply() }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun resetIsland() {
+        getSharedPreferences("island", Context.MODE_PRIVATE).edit()
+            .remove("y").remove("x").remove("w").remove("h").remove("alpha").remove("pause")
+            .remove("collapse").remove("eq").remove("autocolor").remove("excluded").apply()
+        recreate()
     }
 
     private fun collectDiag(): String {

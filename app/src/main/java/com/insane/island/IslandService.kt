@@ -61,7 +61,10 @@ class IslandService : Service() {
     private lateinit var root: FrameLayout
     private lateinit var compact: FrameLayout
     private lateinit var handle: FrameLayout
-    private val excluded = setOf("ru.yandex.music")
+    private fun excludedSet(): Set<String> =
+        (prefs.getString("excluded", "ru.yandex.music") ?: "").split(",").filter { it.isNotBlank() }.toSet()
+    private var baseColor = 0
+    private var appliedColor = 0
     private lateinit var compactArt: ImageView
     private lateinit var eq: EqualizerView
     private lateinit var card: LinearLayout
@@ -85,7 +88,7 @@ class IslandService : Service() {
     private var lastTitle: String? = null
     private val pausedHide = Runnable { hide() }
 
-    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> applyPrefs() }
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, k -> applyPrefs(); if (k == "excluded") reload() }
 
     private val sessionsListener =
         MediaSessionManager.OnActiveSessionsChangedListener { list -> pick(list) }
@@ -375,12 +378,20 @@ class IslandService : Service() {
     }
 
     private fun applyPrefs() {
+        val h = dp(prefs.getInt("h", 38))
+        lp.x = dp(prefs.getInt("x", 0))
         lp.y = when {
             hiddenByUser -> dp(prefs.getInt("y", 6)) + dp(34)
             expanded -> dp(4)
             else -> dp(prefs.getInt("y", 6))
         }
-        compact.layoutParams = compact.layoutParams.apply { width = dp(prefs.getInt("w", 140)) }
+        compact.layoutParams = compact.layoutParams.apply { width = dp(prefs.getInt("w", 140)); height = h }
+        (compact.background as? GradientDrawable)?.cornerRadius = h / 2f
+        compactArt.layoutParams = compactArt.layoutParams.apply { width = h - dp(10); height = h - dp(10) }
+        root.alpha = prefs.getInt("alpha", 100) / 100f
+        eq.visibility = if (prefs.getBoolean("eq", true)) View.VISIBLE else View.GONE
+        val want = if (prefs.getBoolean("autocolor", true)) baseColor else 0xFF8B5CF6.toInt()
+        if (want != 0 && want != appliedColor) { applyColor(want); appliedColor = want }
         if (attached) wm.updateViewLayout(root, lp)
     }
 
@@ -407,7 +418,11 @@ class IslandService : Service() {
                 ch.animate().alpha(1f).setStartDelay(110).setDuration(200).start()
             }
             handler.post(ticker)
+            handler.removeCallbacks(collapse)
+            val cs = prefs.getInt("collapse", 0)
+            if (cs > 0) handler.postDelayed(collapse, cs * 1000L)
         } else {
+            handler.removeCallbacks(collapse)
             for (i in 0 until card.childCount) {
                 card.getChildAt(i).animate().alpha(0f).setStartDelay(0).setDuration(100).start()
             }
@@ -572,7 +587,8 @@ class IslandService : Service() {
     }
 
     private fun pick(list: List<MediaController>?) {
-        val allowed = list?.filter { it.packageName !in excluded }
+        val ex = excludedSet()
+        val allowed = list?.filter { it.packageName !in ex }
         val best = allowed?.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
             ?: allowed?.firstOrNull()
         if (best?.sessionToken != controller?.sessionToken) {
@@ -611,13 +627,15 @@ class IslandService : Service() {
             lastArt = art
             compactArt.setImageBitmap(art)
             cardArt.setImageBitmap(art)
-            applyColor(Bitmap.createScaledBitmap(art, 1, 1, true).getPixel(0, 0))
+            baseColor = Bitmap.createScaledBitmap(art, 1, 1, true).getPixel(0, 0)
+            if (prefs.getBoolean("autocolor", true)) { applyColor(baseColor); appliedColor = baseColor }
         }
 
         val playing = st.state == PlaybackState.STATE_PLAYING
         eq.playing = playing
         handler.removeCallbacks(pausedHide)
-        if (!playing) handler.postDelayed(pausedHide, 20000)
+        val ph = prefs.getInt("pause", 20)
+        if (!playing && ph > 0) handler.postDelayed(pausedHide, ph * 1000L)
 
         // --- проверяем, стоит ли уже лайк ---
         md.getRating(MediaMetadata.METADATA_KEY_USER_RATING)?.let { r ->

@@ -24,7 +24,7 @@ import java.util.*
 class VoiceService : Service(), RecognitionListener {
     companion object { @Volatile var running = false }
 
-    // Команда работает только одной фразой: «кортекс <команда>»
+    // Слово «кортекс» необязательно (настраивается в приложении)
     private val wake = setOf("кортекс", "кортэкс", "картекс")
     private val commands = listOf(
         "дальше", "далее", "назад", "предыдущая", "стоп", "пауза", "старт", "играй", "продолжи",
@@ -52,7 +52,8 @@ class VoiceService : Service(), RecognitionListener {
             try {
                 val model = Model(File(filesDir, "model").absolutePath)
                 val grammar = JSONArray((wake + commands + "[unk]").toList()).toString()
-                speech = SpeechService(Recognizer(model, 16000f, grammar), 16000f).also { it.startListening(this) }
+                val rec = Recognizer(model, 16000f, grammar).also { it.setWords(true) }
+                speech = SpeechService(rec, 16000f).also { it.startListening(this) }
             } catch (e: Exception) { stopSelf() }
         }.start()
         return START_STICKY
@@ -61,17 +62,41 @@ class VoiceService : Service(), RecognitionListener {
     private fun say(s: String) { tts?.speak(s, TextToSpeech.QUEUE_FLUSH, null, "cortex") }
 
     override fun onResult(h: String?) {
-        val words = JSONObject(h ?: return).optString("text").split(" ").filter { it.isNotBlank() }
+        val j = JSONObject(h ?: return)
+        val arr = j.optJSONArray("result")
+        val words: List<String>
+        val conf: List<Double>
+        if (arr != null && arr.length() > 0) {
+            words = (0 until arr.length()).map { arr.getJSONObject(it).optString("word") }
+            conf = (0 until arr.length()).map { arr.getJSONObject(it).optDouble("conf", 1.0) }
+        } else {
+            words = j.optString("text").split(" ").filter { it.isNotBlank() }
+            conf = words.map { 1.0 }
+        }
+        if (words.isEmpty()) return
+
+        val prefs = getSharedPreferences("island", MODE_PRIVATE)
+        val th = prefs.getInt("conf", 70) / 100.0
+        val needWake = prefs.getBoolean("wake", false)
         val wi = words.indexOfFirst { it in wake }
-        if (wi < 0) return
-        val cmd = words.drop(wi + 1).firstOrNull { it in commands } ?: return
+
+        val idx: Int = if (wi >= 0) {
+            // «кортекс <команда>» — работает всегда
+            (wi + 1 until words.size).firstOrNull { words[it] in commands } ?: return
+        } else {
+            if (needWake) return
+            // без слова — только отдельно сказанная команда (защита от ложных срабатываний)
+            if (words.size != 1 || words[0] !in commands) return
+            0
+        }
+        if (conf[idx] < th) return
+
         val now = System.currentTimeMillis()
         if (now - last < 1000) return
         last = now
-        run(cmd)
+        run(words[idx])
     }
 
-    @Suppress("DEPRECATION")
     private fun run(cmd: String) {
         val c = MediaActions.controller(this)
         val t = c?.transportControls
