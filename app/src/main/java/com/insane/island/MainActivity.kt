@@ -16,6 +16,7 @@ import android.media.session.MediaSessionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -218,10 +219,13 @@ class MainActivity : Activity() {
         dot4 = r4.second; st4 = r4.third
         cv.addView(r3.first, lp(14))
         cv.addView(r4.first, lp(14))
-        cv.addView(button("Разрешить микрофон и звонки", 1) {
+        cv.addView(button("Разрешить микрофон, контакты и звонки", 1) {
             requestPermissions(arrayOf(
                 Manifest.permission.RECORD_AUDIO,
                 Manifest.permission.ANSWER_PHONE_CALLS,
+                Manifest.permission.READ_CONTACTS,
+                Manifest.permission.CALL_PHONE,
+                Manifest.permission.BLUETOOTH_CONNECT,
                 Manifest.permission.POST_NOTIFICATIONS
             ), 2)
         }, lp(14))
@@ -235,14 +239,26 @@ class MainActivity : Activity() {
                 startForegroundService(Intent(this, VoiceService::class.java))
             }
         }, lp(14))
+        cv.addView(button("Работа при выключенном экране (без ограничений батареи)", 1) {
+            val pm = getSystemService(PowerManager::class.java)
+            if (pm.isIgnoringBatteryOptimizations(packageName)) {
+                Toast.makeText(this, "Уже разрешено", Toast.LENGTH_SHORT).show()
+            } else {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            }
+        }, lp(10))
         cv.addView(button("Выключить голос", 2) { stopService(Intent(this, VoiceService::class.java)) }, lp(10))
         cv.addView(
-            label("Говори команду: «лайк», «дальше», «стоп»…\nслово «кортекс» перед командой тоже работает.\nоткрой ютуб · открой телеграм · открой <имя приложения>\nдальше · назад · стоп · старт · лайк · дизлайк\nгромче · тише · вперед · повтор · название · время\nответить (на звонок)", 13f, MUTED),
+            label("Говори команду: «лайк», «дальше», «стоп»…\nслово «кортекс» перед командой тоже работает.\nоткрой ютуб · открой телеграм · открой <имя приложения>\nпозвони мама · набери <имя из контактов>\nдальше · назад · стоп · старт · лайк · дизлайк\nгромче · тише · вперед · повтор · название · время\nответить (на звонок)", 13f, MUTED),
             lp(14)
         )
         toggle(cv, "Требовать слово «кортекс»", "wake", false)
         toggle(cv, "Быстрый отклик (реагировать сразу)", "fast", true)
         toggle(cv, "Команда «открой …» для приложений", "openapps", true)
+        toggle(cv, "Команда «позвони …» для контактов", "callcmd", true)
+        toggle(cv, "Звонки только со словом «кортекс» (защита от случайных)", "call_wake", false)
+        choice(cv, "Микрофон", "mic", listOf("Телефон (по умолчанию)", "Bluetooth-гарнитура"), 0)
+        slider(cv, "Шаг громкости («громче»/«тише»)", "vol_step", 1, 5, 2, " ст.", null)
         slider(cv, "Порог уверенности голоса", "conf", 30, 95, 70, " %", null)
         col.addView(cv, lp(26))
 
@@ -448,7 +464,7 @@ class MainActivity : Activity() {
             .remove("collapse").remove("eq").remove("autocolor").remove("excluded")
             .remove("theme").remove("shape").remove("accent").remove("card_r")
             .remove("card_w").remove("card_art").remove("text_scale").remove("btn_h").remove("eq_size")
-            .remove("fade").remove("fade_ms").remove("anim_on").remove("anim_speed").remove("anim_style")
+            .remove("callcmd").remove("call_wake").remove("mic").remove("vol_step").remove("fade").remove("fade_ms").remove("anim_on").remove("anim_speed").remove("anim_style")
             .remove("anim_show").remove("anim_pulse").apply()
         recreate()
     }
@@ -511,7 +527,9 @@ class MainActivity : Activity() {
         setStatus(dot1, st1, ov)
         setStatus(dot2, st2, ls)
         val perms = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
-            checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED
+            checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
         setStatus(dot3, st3, perms)
         setStatus(dot4, st4, File(filesDir, "model/am").exists())
     }

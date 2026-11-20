@@ -5,26 +5,34 @@ import android.app.*
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
 import android.media.MediaMetadata
+import android.media.MediaRecorder
+import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.PowerManager
+import android.provider.ContactsContract
 import android.speech.tts.TextToSpeech
 import android.telecom.TelecomManager
 import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
-import org.vosk.android.RecognitionListener
-import org.vosk.android.SpeechService
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
-class VoiceService : Service(), RecognitionListener {
+class VoiceService : Service() {
     companion object { @Volatile var running = false }
 
-    private class Cmd(val name: String, val pkg: String? = null)
+    private class Cmd(val name: String, val pkg: String? = null, val number: String? = null, val label: String? = null)
 
     // Слово «кортекс» необязательно (настраивается в приложении)
     private val wake = setOf("кортекс", "кортэкс", "картекс")
@@ -33,7 +41,7 @@ class VoiceService : Service(), RecognitionListener {
         "лайк", "дизлайк", "громче", "тише", "вперед", "повтор", "название", "время",
         "ответить", "принять"
     )
-    // Как называть приложения с английскими названиями
+    private val callVerbs = setOf("позвони", "позвонить", "набери", "вызови")
     private val aliases = mapOf(
         "com.google.android.youtube" to "ютуб", "org.telegram.messenger" to "телеграм",
         "org.telegram.messenger.web" to "телеграм", "com.whatsapp" to "ватсап",
@@ -44,11 +52,17 @@ class VoiceService : Service(), RecognitionListener {
         "ru.yandex.music" to "яндекс музыка", "com.google.android.apps.maps" to "карты",
         "com.google.android.gm" to "почта", "com.google.android.apps.photos" to "фото"
     )
-    private val appMap = LinkedHashMap<String, String>()   // как произносится -> пакет
+    private val appMap = LinkedHashMap<String, String>()       // как произносится -> пакет
+    private val contactMap = LinkedHashMap<String, String>()   // как произносится -> номер
 
     private val prefs by lazy { getSharedPreferences("island", MODE_PRIVATE) }
-    private var speech: SpeechService? = null
+    private val main = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
+    private var wl: PowerManager.WakeLock? = null
+    private var record: AudioRecord? = null
+    private var recThread: Thread? = null
+    @Volatile private var listening = false
+    private var btRouted = false
     private var last = 0L
     private var fired = false
 
@@ -63,8 +77,14 @@ class VoiceService : Service(), RecognitionListener {
             .setSmallIcon(android.R.drawable.ic_btn_speak_now).build()
         if (Build.VERSION.SDK_INT >= 29) startForeground(2, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         else startForeground(2, n)
+        // не даём процессору уснуть при выключенном экране
+        if (wl == null) {
+            wl = (getSystemService(POWER_SERVICE) as PowerManager)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "cortex:voice")
+                .apply { setReferenceCounted(false); acquire() }
+        }
         if (tts == null) tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts?.language = Locale("ru") }
-        if (speech == null) Thread {
+        if (!listening && recThread == null) Thread {
             try {
                 val words = LinkedHashSet<String>()
                 words.addAll(wake); words.addAll(commands)
@@ -73,16 +93,63 @@ class VoiceService : Service(), RecognitionListener {
                     words.add("открой")
                     appMap.keys.flatMap { it.split(" ") }.distinct().take(250).forEach { words.add(it) }
                 }
+                if (prefs.getBoolean("callcmd", true)) buildContacts() else contactMap.clear()
+                if (contactMap.isNotEmpty()) {
+                    words.addAll(callVerbs)
+                    contactMap.keys.flatMap { it.split(" ") }.distinct().take(250).forEach { words.add(it) }
+                }
                 words.add("[unk]")
                 val model = Model(File(filesDir, "model").absolutePath)
                 val rec = Recognizer(model, 16000f, JSONArray(words.toList()).toString()).also { it.setWords(true) }
-                speech = SpeechService(rec, 16000f).also { it.startListening(this) }
+                startRecording(rec)
             } catch (e: Exception) { stopSelf() }
-        }.start()
+        }.also { recThread = it }.start()
         return START_STICKY
     }
 
-    // Список приложений для команды «открой …»
+    // ---------- захват звука (телефон / Bluetooth-гарнитура) ----------
+    @Suppress("DEPRECATION")
+    private fun routeBluetoothMic(am: AudioManager): AudioDeviceInfo? = try {
+        if (Build.VERSION.SDK_INT >= 31) {
+            val d = am.availableCommunicationDevices.firstOrNull {
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+            }
+            if (d == null || !am.setCommunicationDevice(d)) null
+            else {
+                btRouted = true
+                Thread.sleep(800)
+                am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.type == d.type }
+            }
+        } else {
+            am.startBluetoothSco(); am.isBluetoothScoOn = true; btRouted = true
+            Thread.sleep(1200)
+            am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+        }
+    } catch (e: Exception) { null }
+
+    private fun startRecording(rec: Recognizer) {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        val dev = if (prefs.getInt("mic", 0) == 1) routeBluetoothMic(am) else null
+        val minBuf = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        val ar = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, 16000,
+            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf * 2, 8000))
+        if (dev != null) ar.setPreferredDevice(dev)
+        ar.startRecording()
+        record = ar
+        listening = true
+        val buf = ShortArray(1024)   // ~64 мс: быстрый отклик
+        while (listening) {
+            val n = ar.read(buf, 0, buf.size)
+            if (n <= 0) continue
+            if (rec.acceptWaveForm(buf, n)) { val r = rec.result; main.post { onResult(r) } }
+            else { val p = rec.partialResult; main.post { onPartialResult(p) } }
+        }
+        try { ar.stop() } catch (_: Exception) {}
+        ar.release()
+        rec.close()
+    }
+
+    // ---------- справочники ----------
     private fun buildApps() {
         appMap.clear()
         val pm = packageManager
@@ -102,15 +169,53 @@ class VoiceService : Service(), RecognitionListener {
         }
     }
 
+    // Контакты с русскими именами: «мама», «иван петров» и просто имя
+    private fun buildContacts() {
+        contactMap.clear()
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return
+        val c = contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
+            null, null, null) ?: return
+        c.use {
+            var count = 0
+            while (it.moveToNext() && count < 400) {
+                val name = it.getString(0)?.lowercase()?.replace('ё', 'е') ?: continue
+                val num = it.getString(1)?.filter { ch -> ch.isDigit() || ch == '+' } ?: continue
+                if (num.isEmpty()) continue
+                val clean = name.replace(Regex("[^а-я ]"), " ").trim().replace(Regex("\\s+"), " ")
+                if (clean.isEmpty()) continue
+                contactMap.putIfAbsent(clean, num)
+                contactMap.putIfAbsent(clean.substringBefore(' '), num)
+                count++
+            }
+        }
+    }
+
     private fun say(s: String) { tts?.speak(s, TextToSpeech.QUEUE_FLUSH, null, "cortex") }
 
-    // Разбор фразы: команда и индекс слова (для проверки уверенности)
+    // ---------- разбор фразы ----------
     private fun parse(words: List<String>, needWake: Boolean, final: Boolean): Pair<Cmd, Int>? {
         val wi = words.indexOfFirst { it in wake }
         val start = if (wi >= 0) wi + 1 else { if (needWake) return null; 0 }
         val rest = words.drop(start)
         if (rest.isEmpty()) return null
 
+        // позвонить контакту (только по окончательному результату, чтобы не звонить не тому)
+        val vi = rest.indexOfFirst { it in callVerbs }
+        if (vi >= 0 && contactMap.isNotEmpty() && prefs.getBoolean("callcmd", true)) {
+            if (!final) return null
+            if (wi < 0 && prefs.getBoolean("call_wake", false)) return null
+            val name = rest.drop(vi + 1)
+            for (n in name.size downTo 1) {
+                val key = name.take(n).joinToString(" ")
+                val num = contactMap[key] ?: continue
+                return Cmd("позвони", number = num, label = key) to (start + vi)
+            }
+            return null
+        }
+
+        // открыть приложение
         val oi = rest.indexOf("открой")
         if (oi >= 0 && prefs.getBoolean("openapps", true)) {
             val name = rest.drop(oi + 1)
@@ -118,9 +223,8 @@ class VoiceService : Service(), RecognitionListener {
             for (n in name.size downTo 1) {
                 val key = name.take(n).joinToString(" ")
                 val pkg = appMap[key] ?: continue
-                // в частичном результате ждём конец, если есть более длинное название
                 if (!final && appMap.keys.any { it.startsWith("$key ") }) return null
-                return Cmd("открой", pkg) to (start + oi)
+                return Cmd("открой", pkg = pkg) to (start + oi)
             }
             return null
         }
@@ -132,8 +236,7 @@ class VoiceService : Service(), RecognitionListener {
         return Cmd(rest[ci]) to (start + ci)
     }
 
-    // Мгновенная реакция по частичному результату (до паузы в речи)
-    override fun onPartialResult(h: String?) {
+    private fun onPartialResult(h: String?) {
         if (!prefs.getBoolean("fast", true)) return
         val text = JSONObject(h ?: return).optString("partial")
         val words = text.split(" ").filter { it.isNotBlank() }
@@ -142,8 +245,8 @@ class VoiceService : Service(), RecognitionListener {
         if (fire(r.first)) fired = true
     }
 
-    override fun onResult(h: String?) {
-        if (fired) { fired = false; return }      // уже выполнено по частичному результату
+    private fun onResult(h: String?) {
+        if (fired) { fired = false; return }
         val j = JSONObject(h ?: return)
         val arr = j.optJSONArray("result")
         val words: List<String>
@@ -165,7 +268,11 @@ class VoiceService : Service(), RecognitionListener {
         val now = System.currentTimeMillis()
         if (now - last < 900) return false
         last = now
-        if (cmd.name == "открой") openApp(cmd.pkg ?: return false) else run(cmd.name)
+        when (cmd.name) {
+            "открой" -> openApp(cmd.pkg ?: return false)
+            "позвони" -> callNumber(cmd.number ?: return false, cmd.label ?: "")
+            else -> run(cmd.name)
+        }
         IslandBus.onCommand?.invoke()
         return true
     }
@@ -176,10 +283,28 @@ class VoiceService : Service(), RecognitionListener {
         try { startActivity(i) } catch (_: Exception) {}
     }
 
+    private fun callNumber(number: String, label: String) {
+        if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            say("Нет разрешения на звонки"); return
+        }
+        try {
+            say("Звоню $label")
+            (getSystemService(TELECOM_SERVICE) as TelecomManager)
+                .placeCall(Uri.fromParts("tel", number, null), Bundle())
+        } catch (_: SecurityException) {}
+    }
+
+    private fun vol(dir: Int) {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val step = prefs.getInt("vol_step", 2)
+        val v = (am.getStreamVolume(AudioManager.STREAM_MUSIC) + dir * step).coerceIn(0, max)
+        am.setStreamVolume(AudioManager.STREAM_MUSIC, v, AudioManager.FLAG_SHOW_UI)
+    }
+
     private fun run(cmd: String) {
         val c = MediaActions.controller(this)
         val t = c?.transportControls
-        val am = getSystemService(AUDIO_SERVICE) as AudioManager
         when (cmd) {
             "дальше", "далее" -> t?.skipToNext()
             "назад", "предыдущая" -> t?.skipToPrevious()
@@ -187,8 +312,8 @@ class VoiceService : Service(), RecognitionListener {
             "старт", "играй", "продолжи" -> Fader.play(this, c)
             "лайк" -> c?.let { MediaActions.like(it) }
             "дизлайк" -> c?.let { MediaActions.dislike(it) }
-            "громче" -> am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, 0)
-            "тише" -> am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, 0)
+            "громче" -> vol(+1)
+            "тише" -> vol(-1)
             "вперед" -> t?.seekTo((c?.playbackState?.position ?: 0L) + 15000)
             "повтор" -> t?.seekTo(0)
             "название" -> {
@@ -209,9 +334,18 @@ class VoiceService : Service(), RecognitionListener {
         } catch (_: SecurityException) {}
     }
 
-    override fun onFinalResult(h: String?) {}
-    override fun onError(e: Exception?) {}
-    override fun onTimeout() {}
-
-    override fun onDestroy() { running = false; speech?.shutdown(); tts?.shutdown(); super.onDestroy() }
+    @Suppress("DEPRECATION")
+    override fun onDestroy() {
+        running = false
+        listening = false
+        if (btRouted) {
+            try {
+                val am = getSystemService(AUDIO_SERVICE) as AudioManager
+                if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice() else am.stopBluetoothSco()
+            } catch (_: Exception) {}
+        }
+        tts?.shutdown()
+        wl?.let { if (it.isHeld) it.release() }
+        super.onDestroy()
+    }
 }
