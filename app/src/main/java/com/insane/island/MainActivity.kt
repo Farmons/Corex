@@ -267,6 +267,10 @@ class MainActivity : Activity() {
         toggle(c2, "Эквалайзер на острове", "eq", true)
         toggle(c2, "Цвет от обложки трека", "autocolor", true)
         c2.addView(button("Не показывать для приложений…", 2) { pickExcluded() }, lp(18))
+        c2.addView(button("Сбросить список исключённых", 2) {
+            getSharedPreferences("island", Context.MODE_PRIVATE).edit().remove("excluded").apply()
+            Toast.makeText(this, "Список сброшен", Toast.LENGTH_SHORT).show()
+        }, lp(10))
         c2.addView(button("Сбросить настройки острова", 2) { resetIsland() }, lp(10))
         col.addView(c2, lp(26))
 
@@ -290,6 +294,18 @@ class MainActivity : Activity() {
         slider(c4, "Высота кнопок управления", "btn_h", 44, 96, 64, " dp", null)
         slider(c4, "Размер эквалайзера", "eq_size", 50, 180, 100, " %", null)
         col.addView(c4, lp(26))
+
+        // ---------- плавность и анимации ----------
+        val c5 = card()
+        c5.addView(label("ПЛАВНОСТЬ И АНИМАЦИИ", 12f, MUTED, true))
+        toggle(c5, "Плавное затухание и нарастание звука", "fade", true)
+        slider(c5, "Длительность затухания", "fade_ms", 200, 3000, 700, " мс", null)
+        toggle(c5, "Анимации острова", "anim_on", true)
+        slider(c5, "Скорость анимаций", "anim_speed", 50, 200, 100, " %", null)
+        choice(c5, "Стиль раскрытия", "anim_style", listOf("Пружина", "Плавная", "Отскок"), 0)
+        toggle(c5, "Плавное появление и скрытие острова", "anim_show", true)
+        toggle(c5, "Подсветка острова при голосовой команде", "anim_pulse", true)
+        col.addView(c5, lp(26))
 
         // ---------- диагностика ----------
         col.addView(button("Диагностика плеера", 2) {
@@ -322,11 +338,13 @@ class MainActivity : Activity() {
     private fun slider(parent: LinearLayout, title: String, key: String, min: Int, max: Int, def: Int, unit: String, zero: String?) {
         val p = getSharedPreferences("island", Context.MODE_PRIVATE)
         val value = label("", 14f, LIGHT)
+        val reset = label("↺", 20f, MUTED).apply { setPadding(dp(14), 0, 0, 0) }
         fun show(v: Int) { value.text = if (zero != null && v == 0) zero else "$v$unit" }
         val head = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(label(title, 15f, Color.WHITE), LinearLayout.LayoutParams(0, WRAP, 1f))
             addView(value)
+            addView(reset)
         }
         val start = p.getInt(key, def).coerceIn(min, max)
         show(start)
@@ -344,6 +362,11 @@ class MainActivity : Activity() {
                 override fun onStopTrackingTouch(s: SeekBar) {}
             })
         }
+        reset.setOnClickListener {
+            p.edit().remove(key).apply()
+            bar.progress = def.coerceIn(min, max) - min
+            show(def.coerceIn(min, max))
+        }
         parent.addView(head, lp(16))
         parent.addView(bar, lp(4))
     }
@@ -360,7 +383,15 @@ class MainActivity : Activity() {
             trackTintList = ColorStateList(arrayOf(on, intArrayOf()), intArrayOf(0x668B5CF6, 0x33FFFFFF))
             setOnCheckedChangeListener { _, c -> p.edit().putBoolean(key, c).apply() }
         }
-        parent.addView(sw, lp(16))
+        val reset = label("↺", 20f, MUTED).apply { setPadding(dp(14), 0, dp(4), 0) }
+        reset.setOnClickListener { p.edit().remove(key).apply(); sw.isChecked = def }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(sw, LinearLayout.LayoutParams(0, WRAP, 1f))
+            addView(reset)
+        }
+        parent.addView(row, lp(16))
     }
 
     private fun choice(parent: LinearLayout, title: String, key: String, options: List<String>, def: Int) {
@@ -377,7 +408,18 @@ class MainActivity : Activity() {
                 }
                 .show()
         }
-        parent.addView(b, lp(10))
+        val reset = label("↺", 20f, MUTED).apply { setPadding(dp(14), 0, dp(4), 0) }
+        reset.setOnClickListener {
+            p.edit().remove(key).apply()
+            b.text = "$title: ${options[def.coerceIn(0, options.size - 1)]}"
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(b, LinearLayout.LayoutParams(0, WRAP, 1f))
+            addView(reset)
+        }
+        parent.addView(row, lp(10))
     }
 
     private fun pickExcluded() {
@@ -405,7 +447,9 @@ class MainActivity : Activity() {
             .remove("y").remove("x").remove("w").remove("h").remove("alpha").remove("pause")
             .remove("collapse").remove("eq").remove("autocolor").remove("excluded")
             .remove("theme").remove("shape").remove("accent").remove("card_r")
-            .remove("card_w").remove("card_art").remove("text_scale").remove("btn_h").remove("eq_size").apply()
+            .remove("card_w").remove("card_art").remove("text_scale").remove("btn_h").remove("eq_size")
+            .remove("fade").remove("fade_ms").remove("anim_on").remove("anim_speed").remove("anim_style")
+            .remove("anim_show").remove("anim_pulse").apply()
         recreate()
     }
 

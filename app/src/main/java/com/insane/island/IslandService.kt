@@ -66,6 +66,7 @@ class IslandService : Service() {
     private var baseColor = 0
     private var appliedColor = 0
     private var appliedStyle = ""
+    private var hiding = false
     private lateinit var compactArt: ImageView
     private lateinit var eq: EqualizerView
     private lateinit var card: LinearLayout
@@ -169,9 +170,11 @@ class IslandService : Service() {
         MediaListener.onChanged = { handler.post { refresh() } }
         initSessions()
         AutoPause.start(this)
+        IslandBus.onCommand = { handler.post { pulse() } }
     }
 
     override fun onDestroy() {
+        IslandBus.onCommand = null
         AutoPause.stop()
         MediaListener.onChanged = null
         handler.removeCallbacksAndMessages(null)
@@ -348,11 +351,8 @@ class IslandService : Service() {
         button(R.drawable.ic_prev, 16) { controller?.transportControls?.skipToPrevious() }
         btnPlay = button(R.drawable.ic_pause, 12) {
             val c = controller
-            if (c?.playbackState?.state == PlaybackState.STATE_PLAYING) {
-                c.transportControls.pause()
-            } else {
-                c?.transportControls?.play()
-            }
+            if (c?.playbackState?.state == PlaybackState.STATE_PLAYING) Fader.pause(this@IslandService, c)
+            else Fader.play(this@IslandService, c)
         }
         button(R.drawable.ic_next, 16) { controller?.transportControls?.skipToNext() }
         btnLike = button(R.drawable.ic_heart, 18) { doLike() }
@@ -417,12 +417,12 @@ class IslandService : Service() {
             card.scaleX = (dp(140).toFloat() / cw).coerceIn(0.2f, 1f)
             card.scaleY = if (card.height > 0) (dp(38).toFloat() / card.height).coerceIn(0.08f, 1f) else 0.3f
             card.alpha = 0f
-            card.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(260)
-                .setInterpolator(OvershootInterpolator(0.8f)).start()
+            card.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(ad(260))
+                .setInterpolator(interp()).start()
             for (i in 0 until card.childCount) {
                 val ch = card.getChildAt(i)
                 ch.alpha = 0f
-                ch.animate().alpha(1f).setStartDelay(110).setDuration(200).start()
+                ch.animate().alpha(1f).setStartDelay(ad(110)).setDuration(ad(200)).start()
             }
             handler.post(ticker)
             handler.removeCallbacks(collapse)
@@ -431,9 +431,9 @@ class IslandService : Service() {
         } else {
             handler.removeCallbacks(collapse)
             for (i in 0 until card.childCount) {
-                card.getChildAt(i).animate().alpha(0f).setStartDelay(0).setDuration(100).start()
+                card.getChildAt(i).animate().alpha(0f).setStartDelay(0).setDuration(ad(100)).start()
             }
-            card.animate().scaleX(0.5f).scaleY(0.3f).alpha(0f).setDuration(180).withEndAction {
+            card.animate().scaleX(0.5f).scaleY(0.3f).alpha(0f).setDuration(ad(180)).withEndAction {
                 if (!expanded) {
                     card.visibility = View.GONE
                     compact.visibility = View.VISIBLE
@@ -512,7 +512,58 @@ class IslandService : Service() {
     // состояние (большой / маленький) НЕ сбрасываем: просто прячем окно, пока нет музыки
     private fun hide() {
         handler.removeCallbacks(ticker)
-        root.visibility = View.GONE
+        if (root.visibility != View.VISIBLE || hiding) return
+        if (prefs.getBoolean("anim_show", true) && prefs.getBoolean("anim_on", true)) {
+            hiding = true
+            root.animate().cancel()
+            root.animate().alpha(0f).setDuration(ad(180)).withEndAction {
+                root.visibility = View.GONE
+                root.alpha = prefs.getInt("alpha", 100) / 100f
+                hiding = false
+            }.start()
+        } else {
+            root.visibility = View.GONE
+        }
+    }
+
+    // плавное появление острова
+    private fun showRoot() {
+        val target = prefs.getInt("alpha", 100) / 100f
+        if (hiding) { root.animate().cancel(); hiding = false; root.alpha = target }
+        if (root.visibility != View.VISIBLE) {
+            root.visibility = View.VISIBLE
+            if (prefs.getBoolean("anim_show", true) && prefs.getBoolean("anim_on", true)) {
+                root.alpha = 0f
+                root.animate().alpha(target).setDuration(ad(220)).start()
+            }
+        }
+    }
+
+    // подсветка острова при голосовой команде
+    private fun pulse() {
+        if (!prefs.getBoolean("anim_on", true) || !prefs.getBoolean("anim_pulse", true)) return
+        val accent = if (prefs.getBoolean("autocolor", true) && baseColor != 0) baseColor else accentColor()
+        (compact.background as? GradientDrawable)?.setStroke(dp(3), accent)
+        compactArt.animate().cancel()
+        compactArt.animate().scaleX(1.25f).scaleY(1.25f).setDuration(ad(120)).withEndAction {
+            compactArt.animate().scaleX(1f).scaleY(1f).setDuration(ad(160)).start()
+        }.start()
+        if (card.visibility == View.VISIBLE) {
+            card.animate().scaleX(1.02f).scaleY(1.02f).setDuration(ad(120)).withEndAction {
+                card.animate().scaleX(1f).scaleY(1f).setDuration(ad(160)).start()
+            }.start()
+        }
+        handler.postDelayed({ styleCompact(dp(prefs.getInt("h", 38))) }, ad(450).coerceAtLeast(200L))
+    }
+
+    private fun ad(base: Long): Long =
+        if (!prefs.getBoolean("anim_on", true)) 0L
+        else base * 100L / prefs.getInt("anim_speed", 100).coerceAtLeast(10)
+
+    private fun interp(): android.animation.TimeInterpolator = when (prefs.getInt("anim_style", 0)) {
+        1 -> android.view.animation.DecelerateInterpolator()
+        2 -> android.view.animation.BounceInterpolator()
+        else -> OvershootInterpolator(0.8f)
     }
 
     // ---------- лайк / дизлайк ----------
@@ -665,7 +716,7 @@ class IslandService : Service() {
             }
         }
         btnPlay.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
-        root.visibility = View.VISIBLE
+        showRoot()
         updateProgress()
     }
 

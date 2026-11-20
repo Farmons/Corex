@@ -166,6 +166,7 @@ class VoiceService : Service(), RecognitionListener {
         if (now - last < 900) return false
         last = now
         if (cmd.name == "открой") openApp(cmd.pkg ?: return false) else run(cmd.name)
+        IslandBus.onCommand?.invoke()
         return true
     }
 
@@ -182,8 +183,8 @@ class VoiceService : Service(), RecognitionListener {
         when (cmd) {
             "дальше", "далее" -> t?.skipToNext()
             "назад", "предыдущая" -> t?.skipToPrevious()
-            "стоп", "пауза" -> t?.pause()
-            "старт", "играй", "продолжи" -> t?.play()
+            "стоп", "пауза" -> Fader.pause(this, c)
+            "старт", "играй", "продолжи" -> Fader.play(this, c)
             "лайк" -> c?.let { MediaActions.like(it) }
             "дизлайк" -> c?.let { MediaActions.dislike(it) }
             "громче" -> am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, 0)
